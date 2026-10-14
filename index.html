@@ -1600,9 +1600,9 @@ DST_CO.forEach((c,i)=>DCOL[c]=CLRS[(i+6)%CLRS.length]);
 // 【점포INDEX 분류법】
 const CATS=[
   {name:'버라이어티',col:'#9B59B6',mainSc:'井田_버라이어티(메인)',otherScs:['井田_버라이어티(기타)'],otherLabel:'버라이어티(기타)'},
-  {name:'드럭스토어',col:'#27AE60',mainSc:'井田_드럭스토어(메인)',otherScs:['井田_드럭스토어(기타)','あらた'],otherLabel:'드럭스토어(기타)'},
+  {name:'드럭스토어',col:'#27AE60',mainScs:['井田_드럭스토어(메인)','あらた_드럭스토어(메인)'],otherScs:['井田_드럭스토어(기타)'],otherLabel:'드럭스토어(기타)'},
   {name:'GMS',col:'#2980B9',mainSc:'井田_GMS(메인)',otherScs:['井田_GMS(기타)'],otherLabel:'GMS(기타)'},
-  {name:'PPIH GROUP',col:'#E67E22',mainSc:'大山_PPIH GROUP',mainNamedOnly:['DONKIHOTE'],otherScs:[],otherLabel:'PPIH GROUP(기타)'},
+  {name:'PPIH GROUP',col:'#E67E22',mainSc:'大山_PPIH GROUP',otherScs:[],otherLabel:'PPIH GROUP(기타)'},
   {name:'기타',col:'#95A5A6',subs:[{label:'전자기기매장',sc:'井田_전자기기매장'},{label:'백화점',sc:'井田_백화점'},{label:'기타출고',sc:'井田_기타출고'},{label:'기타(미분류)',sc:'井田_기타'}]},
 ];
 
@@ -2691,25 +2691,42 @@ function updDstCo(){
 }
 
 // ── 채널 카테고리별 ──
+// 카테고리의 "메인" 서브캣은 여러 개일 수 있다.
+// 같은 업태를 여러 유통사가 취급하면 서브캣 키가 유통사별로 갈라지기 때문이다.
+//   예) 드럭스토어(메인) = 井田_드럭스토어(메인) + あらた_드럭스토어(메인)
+// 기존 카테고리는 mainSc(단일)를 그대로 써도 동작하도록 둘 다 받는다.
+function _mainScsOf(cat){return cat.mainScs||(cat.mainSc?[cat.mainSc]:[]);}
+function _mainV(cat,m,vk){
+  return _mainScsOf(cat).reduce((s,sc)=>s+(((R.dist_by_subcat[sc]||{})[m]||{})[vk]||0),0);
+}
 function getCatV(cat,m,vk){
   if(cat.subs)return cat.subs.reduce((s,sub)=>s+(((R.dist_by_subcat[sub.sc]||{})[m]||{})[vk]||0),0);
-  const mainV=((R.dist_by_subcat[cat.mainSc]||{})[m]||{})[vk]||0;
+  const mainV=_mainV(cat,m,vk);
   const otherV=(cat.otherScs||[]).reduce((s,sc)=>s+(((R.dist_by_subcat[sc]||{})[m]||{})[vk]||0),0);
   return mainV+otherV;
 }
 function getCatOtherV(cat,m,vk){
   const otherScV=(cat.otherScs||[]).reduce((s,sc)=>s+(((R.dist_by_subcat[sc]||{})[m]||{})[vk]||0),0);
   if(cat.mainNamedOnly){
-    const mainTotal=((R.dist_by_subcat[cat.mainSc]||{})[m]||{})[vk]||0;
-    const namedSum=cat.mainNamedOnly.reduce((s,rt)=>s+(((R.dist_by_retail[rt]||{})[m]||{})[vk]||0),0);
+    const mainTotal=_mainV(cat,m,vk);
+    const namedSum=getCatMainRetails(cat).reduce((s,x)=>s+(((R.dist_by_retail[x.key]||{})[m]||{})[vk]||0),0);
     return otherScV+(mainTotal-namedSum);
   }
   return otherScV;
 }
+// 카테고리 하위 리테일 목록.
+// 리테일 데이터의 키는 '서브캣|리테일명' 이다 — 같은 리테일명이 유통사·업태를
+// 넘어 존재하기 때문(UNY, HABITA). 그래서 표시명(rt)과 조회키(key)를 함께 돌려준다.
 function getCatMainRetails(cat){
-  if(!cat.mainSc)return[];
-  if(cat.mainNamedOnly)return cat.mainNamedOnly;
-  return(R.subcat_retails&&R.subcat_retails[cat.mainSc])||[];
+  const ms=_mainScsOf(cat);
+  if(!ms.length)return[];
+  const out=[];
+  ms.forEach(sc=>{
+    let rts=((R.subcat_retails||{})[sc])||[];
+    if(cat.mainNamedOnly)rts=rts.filter(rt=>cat.mainNamedOnly.indexOf(rt)>=0);
+    rts.forEach(rt=>out.push({sc,rt,key:sc+'|'+rt}));
+  });
+  return out.sort((a,b)=>a.rt<b.rt?-1:(a.rt>b.rt?1:0));
 }
 function _rtlq(j,rt,m){return(((R.prod_retail_all[j]||{})[rt]||{})[m]||0);}
 function _rtlscsto(jan,rt,m){return(((R.prod_rt_stores||{})[jan]||{})[rt]||{})[m]||0;}
@@ -2729,32 +2746,45 @@ function updDstSc(){
 
 function buildCatTable(vk){
   const allM=fmths;   // 상단 기간 필터를 따른다
+  // ══════════════════════════════════════════════════════════
+  // vk('qty'|'sales') 를 표 전체에 반영한다
+  // ══════════════════════════════════════════════════════════
+  // 예전에는 vk 를 인자로 받고도 쓰지 않아, "판매금액" 버튼을 눌러도
+  // 차트만 금액으로 바뀌고 이 표는 계속 수량(EA)을 보여줬다. 표 위 안내문만
+  // "판매금액 기준"으로 바뀌어서, 수량을 엔화 금액으로 읽게 되는 상태였다.
+  const isS=vk==='sales';
+  const lblV=isS?t('sales_dst_lbl'):t('qty');
+  const lblP=isS?(lang==='jp'?'店あたり売上':'점당매출'):t('per');
+  const fmtV=v=>v>0?fmtF(isS?Math.round(v):v):'-';
+  const perV=(v,sto)=>sto>0?(isS?fmtF(Math.round(v/sto)):(+(v/sto).toFixed(1))):'-';
+  // 상품 단위에는 원본에 금액 필드가 없다(prod_retail_all·prod_cat_all 은 수량 스칼라).
+  // 집계 단계와 똑같은 방식 — 수량 × 그 달의 VAT포함가 — 로 환산해 기준을 일치시킨다.
+  const sv=(jan,m,q)=>isS?q*priceOf(jan,m):q;
   let h=`<thead><tr class="mgrp">
     <th class="stk" rowspan="2" style="min-width:68px;text-align:center">${t('type')}</th>
     <th class="stk2" rowspan="2" style="min-width:200px;text-align:left">${lang==='jp'?'カテゴリ / チャネル':'카테고리 / 채널'}</th>`;
   allM.forEach(m=>h+=`<th colspan="3" style="border-left:2px solid #D5DCE8;text-align:center">${getML(m)}</th>`);
-  h+=`<th rowspan="2" style="border-left:2px solid #D5DCE8;text-align:center;background:#ECF0F5;min-width:66px">${lang==='jp'?'合計':'합계'}</th>`;
+  h+=`<th rowspan="2" style="border-left:2px solid #D5DCE8;text-align:center;background:#ECF0F5;min-width:${isS?90:66}px">${lang==='jp'?'合計':'합계'}</th>`;
   h+=`</tr><tr>`;
-  allM.forEach(()=>h+=`<th style="border-left:2px solid #D5DCE8;min-width:62px">${t('qty')}</th><th style="min-width:48px">${t('stores')}</th><th style="min-width:46px">${t('per')}</th>`);
+  allM.forEach(()=>h+=`<th style="border-left:2px solid #D5DCE8;min-width:${isS?86:62}px">${lblV}</th><th style="min-width:48px">${t('stores')}</th><th style="min-width:${isS?68:46}px">${lblP}</th>`);
   h+=`</tr></thead><tbody>`;
 
   CATS.forEach(cat=>{
     const hasD=allM.some(m=>getCatV(cat,m,'qty')>0);
     if(!hasD)return;
     const isOpen=openCats.has(cat.name);
-    const catTotQ=allM.reduce((s,m)=>s+getCatV(cat,m,'qty'),0);
+    const catTotQ=allM.reduce((s,m)=>s+getCatV(cat,m,vk),0);
     // ── Level 1: 카테고리 행 ──
     h+=`<tr class="catrow${isOpen?' open':''}" onclick="toggleCat('${cat.name}')" style="cursor:pointer">`;
     h+=`<td class="stk" style="text-align:center;font-size:13px;color:${cat.col}">${isOpen?'▼':'▶'}</td>`;
     h+=`<td class="stk2" style="font-weight:700;color:${cat.col}!important">${cat.name}</td>`;
     allM.forEach(m=>{
-      const qty=getCatV(cat,m,'qty'),sto=getCatV(cat,m,'stores');
-      const per=sto>0?+(qty/sto).toFixed(1):null;
-      h+=`<td style="border-left:2px solid #D5DCE8">${qty>0?fmtF(qty):'-'}</td>`;
+      const val=getCatV(cat,m,vk),sto=getCatV(cat,m,'stores');
+      h+=`<td style="border-left:2px solid #D5DCE8">${fmtV(val)}</td>`;
       h+=`<td>${sto>0?fmtF(sto):'-'}</td>`;
-      h+=`<td>${per!=null?per:'-'}</td>`;
+      h+=`<td>${perV(val,sto)}</td>`;
     });
-    h+=`<td style="border-left:2px solid #D5DCE8;font-weight:700;background:#ECF0F5">${fmtF(catTotQ)}</td></tr>`;
+    h+=`<td style="border-left:2px solid #D5DCE8;font-weight:700;background:#ECF0F5">${fmtV(catTotQ)}</td></tr>`;
 
     if(!isOpen)return;
 
@@ -2763,68 +2793,67 @@ function buildCatTable(vk){
       cat.subs.forEach(sub=>{
         const hasSD=allM.some(m=>(((R.dist_by_subcat[sub.sc]||{})[m]||{}).qty||0)>0);
         if(!hasSD)return;
-        const subTotQ=allM.reduce((s,m)=>s+(((R.dist_by_subcat[sub.sc]||{})[m]||{}).qty||0),0);
+        const subTotQ=allM.reduce((s,m)=>s+(((R.dist_by_subcat[sub.sc]||{})[m]||{})[vk]||0),0);
         h+=`<tr class="catprod">`;
         h+=`<td class="stk" style="text-align:center;font-size:10px;color:#888">-</td>`;
         h+=`<td class="stk2" style="padding-left:14px;color:#666">${sub.label}</td>`;
         allM.forEach(m=>{
           const d=(R.dist_by_subcat[sub.sc]||{})[m]||{};
-          const qty=d.qty||0,sto=d.stores||0,per=d.per||null;
-          h+=`<td style="border-left:2px solid #E0D8F8;background:#F5F7FA">${qty>0?fmtF(qty):'-'}</td>`;
+          const val=d[vk]||0,sto=d.stores||0;
+          h+=`<td style="border-left:2px solid #E0D8F8;background:#F5F7FA">${fmtV(val)}</td>`;
           h+=`<td style="background:#F5F7FA">${sto>0?fmtF(sto):'-'}</td>`;
-          h+=`<td style="background:#F5F7FA">${per!=null?per:'-'}</td>`;
+          h+=`<td style="background:#F5F7FA">${perV(val,sto)}</td>`;
         });
-        h+=`<td style="border-left:2px solid #D5DCE8;background:#EEEEF7;font-weight:600">${fmtF(subTotQ)}</td></tr>`;
+        h+=`<td style="border-left:2px solid #D5DCE8;background:#EEEEF7;font-weight:600">${fmtV(subTotQ)}</td></tr>`;
       });
       return;
     }
 
     // ── Level 2B: named retails + 기타 aggregate ──
     const namedRtls=getCatMainRetails(cat);
-    namedRtls.forEach(rt=>{
-      const rtData=R.dist_by_retail[rt];
+    namedRtls.forEach(({rt,key:rtk})=>{
+      const rtData=R.dist_by_retail[rtk];
       if(!rtData)return;
       const hasRtD=allM.some(m=>(rtData[m]||{}).qty>0);
       if(!hasRtD)return;
-      const rtTotQ=allM.reduce((s,m)=>s+((rtData[m]||{}).qty||0),0);
+      const rtTotQ=allM.reduce((s,m)=>s+((rtData[m]||{})[vk]||0),0);
       const rtKey=`${cat.name}|${rt}`;
       const rtOpen=openScRtls.has(rtKey);
       const safeKey=rtKey.replace(/'/g,"\'");
-      const hasProdData=R.prod_retail_all&&Object.values(R.prod_retail_all).some(byRt=>byRt[rt]);
+      const hasProdData=R.prod_retail_all&&Object.values(R.prod_retail_all).some(byRt=>byRt[rtk]);
       h+=`<tr class="${hasProdData?'catrtl':'catprod'}${hasProdData&&rtOpen?' open':''}" ${hasProdData?`onclick="event.stopPropagation();toggleCatRtl('${safeKey}')" style="cursor:pointer"`:''}">`;
       h+=`<td class="stk" style="text-align:center;font-size:11px;color:${cat.col}">${hasProdData?(rtOpen?'▼':'▶'):'-'}</td>`;
       h+=`<td class="stk2" style="padding-left:14px;font-weight:600">${rt}</td>`;
       allM.forEach(m=>{
         const d=rtData[m]||{};
-        const qty=d.qty||0,sto=d.stores||0,per=d.per||null;
-        h+=`<td style="border-left:2px solid #E8E0F8;background:#F8F5FF">${qty>0?fmtF(qty):'-'}</td>`;
+        const val=d[vk]||0,sto=d.stores||0;
+        h+=`<td style="border-left:2px solid #E8E0F8;background:#F8F5FF">${fmtV(val)}</td>`;
         h+=`<td style="background:#F8F5FF">${sto>0?fmtF(sto):'-'}</td>`;
-        h+=`<td style="background:#F8F5FF">${per!=null?per:'-'}</td>`;
+        h+=`<td style="background:#F8F5FF">${perV(val,sto)}</td>`;
       });
-      h+=`<td style="border-left:2px solid #D5DCE8;background:#F0EEFF;font-weight:600">${fmtF(rtTotQ)}</td></tr>`;
+      h+=`<td style="border-left:2px solid #D5DCE8;background:#F0EEFF;font-weight:600">${fmtV(rtTotQ)}</td></tr>`;
 
       // ── Level 3: Products under this retail ──
       if(rtOpen&&R.prod_retail_all){
         const prods=Object.keys(R.prod_retail_all)
           .filter(jan=>PM_KNOWN.has(jan))
-          .map(jan=>({jan,qty:allM.reduce((s,m)=>s+_rtlq(jan,rt,m),0)}))
+          .map(jan=>({jan,qty:allM.reduce((s,m)=>s+_rtlq(jan,rtk,m),0)}))
           .filter(d=>d.qty>0).sort((a,b)=>b.qty-a.qty);
         prods.forEach(({jan})=>{
           const nm=sname(jan)||(R.prod_names[jan]||jan).slice(0,40);
           const _g=PM_GUBUN[jan]||'';
-          const prodTotQ=allM.reduce((s,m)=>s+_rtlq(jan,rt,m),0);
+          const prodTotQ=allM.reduce((s,m)=>s+sv(jan,m,_rtlq(jan,rtk,m)),0);
           h+=`<tr class="catrtlprod">`;
           h+=`<td class="stk" style="text-align:center;font-size:9px;font-weight:700;color:${gubunColor(_g)};background:${gubunBg(_g)}!important;word-break:keep-all;line-height:1.3">${_g||'―'}</td>`;
           h+=`<td class="stk2" style="padding-left:28px;font-size:12px">${nm}</td>`;
           allM.forEach(m=>{
-            const qty=_rtlq(jan,rt,m);
-            const sto=_rtlscsto(jan,rt,m);
-            const per=sto>0?+(qty/sto).toFixed(1):null;
-            h+=`<td style="border-left:2px solid #E0D8F8;background:#F5F3FF">${qty>0?fmtF(qty):'-'}</td>`;
+            const val=sv(jan,m,_rtlq(jan,rtk,m));
+            const sto=_rtlscsto(jan,rtk,m);
+            h+=`<td style="border-left:2px solid #E0D8F8;background:#F5F3FF">${fmtV(val)}</td>`;
             h+=`<td style="background:#F5F3FF">${sto>0?fmtF(sto):'-'}</td>`;
-            h+=`<td style="background:#F5F3FF">${per!=null?per:'-'}</td>`;
+            h+=`<td style="background:#F5F3FF">${perV(val,sto)}</td>`;
           });
-          h+=`<td style="border-left:2px solid #D5DCE8;background:#EDE9FE;font-weight:600">${fmtF(prodTotQ)}</td></tr>`;
+          h+=`<td style="border-left:2px solid #D5DCE8;background:#EDE9FE;font-weight:600">${fmtV(prodTotQ)}</td></tr>`;
         });
       }
     });
@@ -2835,19 +2864,18 @@ function buildCatTable(vk){
       const otherKey=`${cat.name}|__other__`;
       const otherOpen=openScOthers.has(otherKey);
       const safeOKey=otherKey.replace(/'/g,"\'");
-      const otherTotQ=allM.reduce((s,m)=>s+getCatOtherV(cat,m,'qty'),0);
+      const otherTotQ=allM.reduce((s,m)=>s+getCatOtherV(cat,m,vk),0);
       h+=`<tr class="catrtl${otherOpen?' open':''}" onclick="event.stopPropagation();toggleCatOther('${safeOKey}')" style="cursor:pointer">`;
       h+=`<td class="stk" style="text-align:center;font-size:11px;color:#888">${otherOpen?'▼':'▶'}</td>`;
       h+=`<td class="stk2" style="padding-left:14px;color:#888;font-weight:600">${cat.otherLabel||cat.name+'(기타)'}</td>`;
       allM.forEach(m=>{
-        const qty=getCatOtherV(cat,m,'qty');
+        const val=getCatOtherV(cat,m,vk);
         const sto=getCatOtherV(cat,m,'stores');
-        const per=sto>0?+(qty/sto).toFixed(1):null;
-        h+=`<td style="border-left:2px solid #E0D8F8;background:#F9F9FB">${qty>0?fmtF(qty):'-'}</td>`;
+        h+=`<td style="border-left:2px solid #E0D8F8;background:#F9F9FB">${fmtV(val)}</td>`;
         h+=`<td style="background:#F9F9FB">${sto>0?fmtF(sto):'-'}</td>`;
-        h+=`<td style="background:#F9F9FB">${per!=null?per:'-'}</td>`;
+        h+=`<td style="background:#F9F9FB">${perV(val,sto)}</td>`;
       });
-      h+=`<td style="border-left:2px solid #D5DCE8;background:#F3F4F6;font-weight:600">${fmtF(otherTotQ)}</td></tr>`;
+      h+=`<td style="border-left:2px solid #D5DCE8;background:#F3F4F6;font-weight:600">${fmtV(otherTotQ)}</td></tr>`;
 
       // ── 기타 open: 상품 목록 ──
       if(otherOpen&&R.prod_cat_all){
@@ -2861,31 +2889,52 @@ function buildCatTable(vk){
         prods.forEach(({jan})=>{
           const nm=sname(jan)||(R.prod_names[jan]||jan).slice(0,40);
           const _g=PM_GUBUN[jan]||'';
-          const prodTotQ=allM.reduce((s,m)=>s+getCatProdOtherV(jan,cat,m),0);
+          const prodTotQ=allM.reduce((s,m)=>s+sv(jan,m,getCatProdOtherV(jan,cat,m)),0);
           h+=`<tr class="catrtlprod">`;
           h+=`<td class="stk" style="text-align:center;font-size:9px;font-weight:700;color:${gubunColor(_g)};background:${gubunBg(_g)}!important;word-break:keep-all;line-height:1.3">${_g||'―'}</td>`;
           h+=`<td class="stk2" style="padding-left:28px;font-size:12px">${nm}</td>`;
           allM.forEach(m=>{
-            const qty=getCatProdOtherV(jan,cat,m);
-            h+=`<td style="border-left:2px solid #E0D8F8;background:#F5F7FA">${qty>0?fmtF(qty):'-'}</td>`;
+            const val=sv(jan,m,getCatProdOtherV(jan,cat,m));
+            h+=`<td style="border-left:2px solid #E0D8F8;background:#F5F7FA">${fmtV(val)}</td>`;
             h+=`<td style="background:#F5F7FA">-</td>`;
             h+=`<td style="background:#F5F7FA">-</td>`;
           });
-          h+=`<td style="border-left:2px solid #D5DCE8;background:#EEEEF7;font-weight:600">${fmtF(prodTotQ)}</td></tr>`;
+          h+=`<td style="border-left:2px solid #D5DCE8;background:#EEEEF7;font-weight:600">${fmtV(prodTotQ)}</td></tr>`;
         });
       }
     }
   });
 
-  // ── 합계 행 ──
-  const tots=allM.map(m=>{const q=R.dist_total?R.dist_total[m]||0:CATS.reduce((s,cat)=>s+getCatV(cat,m,'qty'),0);return{qty:q};});
-  const grandTotQ=tots.reduce((s,tt)=>s+tt.qty,0);
+  // ══════════════════════════════════════════════════════════
+  // 합계 행 — 위 카테고리 행들의 실제 합으로 만든다
+  // ══════════════════════════════════════════════════════════
+  // 예전에는 R.dist_total 을 그대로 찍었다. 두 가지 문제가 있었다.
+  //  ① dist_total 은 수량만 담는다 → 판매금액 모드에서도 수량(EA)이 표시됐다
+  //  ② 카테고리 행 합과 어긋나도 화면에 드러나지 않았다. 배분표(CATS)에 없는
+  //     분류가 생기면 그 물량은 위 행들에서 조용히 빠지는데, 합계는 원본 값이라
+  //     여전히 맞아 보였다. 검산이 원천적으로 불가능한 구조였다.
+  const tots=allM.map(m=>CATS.reduce((s,cat)=>s+getCatV(cat,m,vk),0));
+  const grandTot=tots.reduce((s,v)=>s+v,0);
+  const hasRef=!isS&&!!R.dist_total;
+  const gaps=allM.map((m,i)=>hasRef?(((R.dist_total||{})[m]||0)-tots[i]):0);
+  const gapSum=gaps.reduce((s,v)=>s+v,0);
   h+=`<tr class="tot"><td class="stk"></td><td class="stk2">${t('total')}</td>`;
-  tots.forEach(tt=>{
-    h+=`<td style="border-left:2px solid #D5DCE8">${tt.qty>0?fmtF(tt.qty):'-'}</td>`;
+  allM.forEach((m,i)=>{
+    const g=gaps[i];
+    const warn=g?`;color:#C0392B`:'';
+    const tip=g?` title="${lang==='jp'?'元データ合計との差':'원본 총합과 차이'} ${fmtF(g)}"`:'';
+    h+=`<td style="border-left:2px solid #D5DCE8${warn}"${tip}>${fmtV(tots[i])}</td>`;
     h+=`<td>-</td><td>-</td>`;
   });
-  h+=`<td style="border-left:2px solid #D5DCE8;font-weight:700;background:#ECF0F5">${fmtF(grandTotQ)}</td></tr></tbody>`;
+  h+=`<td style="border-left:2px solid #D5DCE8;font-weight:700;background:#ECF0F5">${fmtV(grandTot)}</td></tr>`;
+  if(gapSum){
+    h+=`<tr><td colspan="${allM.length*3+3}" style="padding:7px 10px;text-align:left;font-size:11px;color:#C0392B;background:#FDF3F2;border-top:1px solid #F5C6C0">`
+      +`&#9888; ${lang==='jp'
+        ?`配分表(店舗INDEX)に無い分類が ${fmtF(gapSum)} EA あり、上のカテゴリ行に反映されていません。`
+        :`배분표(점포코드INDEX)에 없는 분류가 ${fmtF(gapSum)} EA 있어 위 카테고리 행에 반영되지 않았습니다.`}`
+      +`</td></tr>`;
+  }
+  h+=`</tbody>`;
   document.getElementById('dst-sc-tbl').innerHTML=h;
 }
 function toggleCat(name){openCats.has(name)?openCats.delete(name):openCats.add(name);buildCatTable(dstScV);}
@@ -3296,17 +3345,18 @@ const PROD_CATS=CATS;
 function _pq(j,m){return((R.prod_dist_all[j]||{})[m]||0);}
 function _cq(j,c,m){return(((R.prod_cat_all[j]||{})[c]||{})[m]||0);}
 function _scsto(sc,m){return((R.dist_by_subcat[sc]||{})[m]||{}).stores||0;}
+function _mainProdV(jan,cat,m){return _mainScsOf(cat).reduce((s,sc)=>s+_cq(jan,sc,m),0);}
 function getCatProdV(jan,cat,m){
   if(cat.subs)return cat.subs.reduce((s,sub)=>s+_cq(jan,sub.sc,m),0);
-  const mainV=_cq(jan,cat.mainSc,m);
+  const mainV=_mainProdV(jan,cat,m);
   const otherV=(cat.otherScs||[]).reduce((s,sc)=>s+_cq(jan,sc,m),0);
   return mainV+otherV;
 }
 function getCatProdOtherV(jan,cat,m){
   const otherV=(cat.otherScs||[]).reduce((s,sc)=>s+_cq(jan,sc,m),0);
   if(cat.mainNamedOnly){
-    const mainTotal=_cq(jan,cat.mainSc,m);
-    const namedSum=cat.mainNamedOnly.reduce((s,rt)=>s+(((R.prod_retail_all[jan]||{})[rt]||{})[m]||0),0);
+    const mainTotal=_mainProdV(jan,cat,m);
+    const namedSum=getCatMainRetails(cat).reduce((s,x)=>s+(((R.prod_retail_all[jan]||{})[x.key]||{})[m]||0),0);
     return otherV+(mainTotal-namedSum);
   }
   return otherV;
@@ -3385,12 +3435,12 @@ function buildProdView(){
       // ── Level 3: named retails ──
       if(!cat.subs){
         const namedRtls=getCatMainRetails(cat);
-        namedRtls.forEach(rt=>{
-          const rqty=fmths.reduce((s,m)=>s+_rtlq(jan,rt,m),0);
+        namedRtls.forEach(({rt,key:rtk})=>{
+          const rqty=fmths.reduce((s,m)=>s+_rtlq(jan,rtk,m),0);
           if(!rqty)return;
           const rMV=fmths.map(m=>{
-            const qty=_rtlq(jan,rt,m);
-            const sto=_rtlscsto(jan,rt,m);
+            const qty=_rtlq(jan,rtk,m);
+            const sto=_rtlscsto(jan,rtk,m);
             return{qty,sto,per:sto>0?+(qty/sto).toFixed(1):null};
           });
           const rTotQ=rMV.reduce((s,v)=>s+v.qty,0);
@@ -3474,12 +3524,12 @@ function downloadProdAll(){
       });
       crow.push(cqty);rows.push(crow);
       if(!cat.subs){
-        getCatMainRetails(cat).forEach(rt=>{
-          const rqty=fmths.reduce((s,m)=>s+_rtlq(jan,rt,m),0);
+        getCatMainRetails(cat).forEach(({rt,key:rtk})=>{
+          const rqty=fmths.reduce((s,m)=>s+_rtlq(jan,rtk,m),0);
           if(!rqty)return;
           const rrow=['','',`    ${rt}`];
           fmths.forEach(m=>{
-            const qty=_rtlq(jan,rt,m);const sto=_rtlscsto(jan,rt,m);
+            const qty=_rtlq(jan,rtk,m);const sto=_rtlscsto(jan,rtk,m);
             rrow.push(qty,sto>0?sto:'',sto>0?+(qty/sto).toFixed(1):'');
           });
           rrow.push(rqty);rows.push(rrow);
@@ -3984,15 +4034,27 @@ function getSrchJans(){
     return true;
   });
 }
-// ── 상품검색: 유통사-리테일러 매핑 ──
-// prod_retail_all의 리테일러를 유통사로 분류
-const _DR={
-  '井田':['LOFT','PLAZA','SHOP IN','@COSME','AINZ&TULPE','SUGI','WELCIA GROUP','MCC GROUP','AEON',
-           'TSURUHA','COCOKARA FINE','SUNDRUG','HANSHIN','NAGASAKIYA','TAKASHIMAYA','TOKYU','ISETAN',
-           'KEIO','LABI','HANDS','기타','기타 (직원구매)'],
-  '大山':['DONKIHOTE','MEGA UNY','EDION','YODOBASHI','BIC CAMERA','LOTTE','HABITA'],
-  'あらた':['COSMOS','UNY','KINTETSU'],
-};
+// ══════════════════════════════════════════════════════════════
+// 상품검색: 유통사 → 리테일 키 매핑 (데이터에서 자동 생성)
+// ══════════════════════════════════════════════════════════════
+// 예전에는 이 표를 손으로 적어두었다. 점포코드INDEX 에 이미 있는 정보를
+// 중복 관리한 셈이라 실제 데이터와 계속 어긋났다. 확인된 오류만 이 정도였다.
+//   · 잘못 귀속 9개 / 561,918EA
+//       UNY 506,746EA → 'あらた' 로 적혀 있었지만 실제는 大山 435,530 + 井田 71,216
+//       HABITA·BIC CAMERA·YODOBASHI·EDION·LOTTE → '大山' 로 적혀 있었지만 실제는 井田
+//       KINTETSU → 'あらた' 로 적혀 있었지만 실제는 井田(백화점)
+//   · 표에 아예 없는 리테일 134개 / 4,145,322EA (CREATE·KUSURINO AOKI·TOMODS 등)
+//   → 수기 표가 커버하는 물량이 전체의 81% 뿐이었다.
+// 이제 subcat_retails('유통사_업태' → 리테일 목록)에서 그대로 유도한다.
+// 리테일 데이터의 키가 '서브캣|리테일명' 이므로 같은 형태로 만든다.
+const _DR=(()=>{
+  const o={};
+  Object.keys(R.subcat_retails||{}).forEach(sc=>{
+    const co=sc.split('_')[0];
+    (o[co]=o[co]||[]).push(...(R.subcat_retails[sc]||[]).map(rt=>sc+'|'+rt));
+  });
+  return o;
+})();
 const _DN={'井田':'이다','大山':'오오야마','あらた':'아라타'};
 // 유통사별 POS 채널 (pos_channels key → 표시 레이블)
 const _DP={
